@@ -46,7 +46,7 @@ Incompatible with **Heaven** since it shares the same hook.
 
 ## Credits 
 
-Thanks to ([Night DC (nighty333)](https://github.com/Nighty3333/)) for letting me use his affinity overlay from **Heaven Internal Public** as a base for this plugin.
+Thanks to [Night DC (nighty333)](https://github.com/Nighty3333/) for letting me use his affinity overlay from **Heaven Internal Public** as a base for this plugin.
 
 ## License
 
