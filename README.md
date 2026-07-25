@@ -50,4 +50,4 @@ Thanks to ([Night DC (nighty333)](https://github.com/Nighty3333/)) for letting m
 
 ## License
 
-MIT License
+[MIT License](LICENSE)
