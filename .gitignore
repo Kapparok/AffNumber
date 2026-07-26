@@ -1,5 +1,6 @@
 /target/
 /dist/
+/backups/
 *.pdb
 *.dll
 *.dll.exp

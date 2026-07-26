@@ -372,6 +372,10 @@ unsafe extern "C" fn calc_hook(trainee: i32, p1: usize, p2: usize, mi: usize) ->
     let f: CalcFn = std::mem::transmute(tr);
     let total = f(trainee, p1, p2, mi);
 
+    if STEP.load(Ordering::Relaxed) == 0 {
+        return total;
+    }
+
     let lp1 = LAST_P1.load(Ordering::Relaxed);
     let lp2 = LAST_P2.load(Ordering::Relaxed);
     if LAST_TRAINEE.load(Ordering::Relaxed) == trainee
