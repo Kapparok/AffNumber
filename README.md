@@ -1,6 +1,6 @@
 # AffNumber
 
-([Hachimi](https://github.com/kairusds/Hachimi-Edge)) plugin based on Heaven functionality that shows **exact Legacy Select affinity numbers**.
+[Hachimi](https://github.com/kairusds/Hachimi-Edge) plugin based on **Heaven** functionality that shows **exact Legacy Select affinity numbers**.
 
 Works on **Global and Japanese** version of the game.
 
@@ -41,13 +41,13 @@ Incompatible with **Heaven** since it shares the same hook.
 
 ## Requirements
 
-- ([Hachimi]https://github.com/kairusds/Hachimi-Edge)
+- [Hachimi](https://github.com/kairusds/Hachimi-Edge)
 - The game (you know which one)
 
 ## Credits 
 
-Thanks to ([Night DC (nighty333)](https://github.com/Nighty3333/)) for letting me use his affinity overlay from **Heaven Internal Public** as a base for this plugin.
+Thanks to [Night DC (nighty333)](https://github.com/Nighty3333/) for letting me use his affinity overlay from **Heaven Internal Public** as a base for this plugin.
 
 ## License
 
-MIT License
+[MIT License](LICENSE)
