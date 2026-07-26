@@ -2,7 +2,7 @@
 name = "affnumber"
 version = "1.0.1"
 edition = "2021"
-description = "Hachimi Edge plugin — Legacy Select affinity numbers (stock Edge, no Hachimi patches)"
+description = "Affinity Numbers for Hachimi"
 license = "MIT"
 
 [lib]
