@@ -352,7 +352,7 @@ pub extern "C" fn menu_section(ui: *mut c_void, _userdata: *mut c_void) {
     }
     api::ui_checkbox(ui, "Reset size", &mut reset);
     if reset {
-        affinity::set_size(1.38);
+        affinity::set_size(1.40);
     }
     api::ui_checkbox(ui, "Reset positions", &mut reset_pos);
     if reset_pos {

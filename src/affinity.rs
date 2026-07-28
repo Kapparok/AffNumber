@@ -28,7 +28,6 @@ static CALC_TRAMP: AtomicUsize = AtomicUsize::new(0);
 static SHOW_TRAMP: AtomicUsize = AtomicUsize::new(0);
 static HIDE_TRAMP: AtomicUsize = AtomicUsize::new(0);
 static ISDLG_TRAMP: AtomicUsize = AtomicUsize::new(0);
-static RESET_TRAMP: AtomicUsize = AtomicUsize::new(0);
 
 static DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
 static LAST_TRAINEE: AtomicI32 = AtomicI32::new(i32::MIN);
@@ -36,7 +35,7 @@ static LAST_P1: AtomicUsize = AtomicUsize::new(usize::MAX);
 static LAST_P2: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 const DEFAULT_POS: [[f32; 2]; 3] = [[0.35, 0.15], [0.15, 0.50], [0.30, 0.50]];
-const DEFAULT_SIZE: f32 = 1.38;
+const DEFAULT_SIZE: f32 = 1.40;
 
 pub fn is_enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
@@ -61,6 +60,10 @@ pub fn poll_toggle_hotkey() {
         return;
     }
     let down = key_down(vk as i32);
+    if !game_focused() {
+        TOGGLE_WAS_DOWN.store(down, Ordering::Relaxed);
+        return;
+    }
     let was = TOGGLE_WAS_DOWN.swap(down, Ordering::Relaxed);
     if down && !was {
         let next = !is_enabled();
@@ -142,6 +145,20 @@ pub fn badge_items() -> Vec<(usize, String, i32)> {
 
 fn key_down(vk: i32) -> bool {
     unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(vk) < 0 }
+}
+
+fn game_focused() -> bool {
+    unsafe {
+        use windows::Win32::System::Threading::GetCurrentProcessId;
+        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return false;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        pid == GetCurrentProcessId()
+    }
 }
 
 fn parent_ptr_set(p: usize) -> bool {
@@ -264,16 +281,16 @@ pub fn snapshot_cfg() -> (bool, String, f32, [f32; 2], [f32; 2], [f32; 2], Strin
 
 type CalcFn = unsafe extern "C" fn(i32, usize, usize, usize) -> i32;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 enum ParentSlot {
     One,
     Two,
 }
 
 fn slot_of(p: usize, lp1: usize, lp2: usize) -> Option<ParentSlot> {
-    if p == lp1 && parent_ptr_set(p) {
+    if parent_ptr_set(p) && p == lp1 {
         Some(ParentSlot::One)
-    } else if p == lp2 && parent_ptr_set(p) {
+    } else if parent_ptr_set(p) && p == lp2 {
         Some(ParentSlot::Two)
     } else {
         None
@@ -290,33 +307,51 @@ fn store_values(total: i32, ind1: i32, ind2: i32, p1: usize, p2: usize, trainee:
     LAST_P2.store(if parent_ptr_set(p2) { p2 } else { usize::MAX }, Ordering::Relaxed);
 }
 
-fn place_new(
-    ptr: usize,
+fn call_order(p1: usize, p2: usize, va: i32, vb: i32) -> (i32, i32, usize, usize) {
+    (
+        if parent_ptr_set(p1) { va } else { -1 },
+        if parent_ptr_set(p2) { vb } else { -1 },
+        if parent_ptr_set(p1) { p1 } else { usize::MAX },
+        if parent_ptr_set(p2) { p2 } else { usize::MAX },
+    )
+}
+
+fn set_slot(
+    slot: ParentSlot,
     val: i32,
-    other_slot: Option<ParentSlot>,
+    ptr: usize,
     s1: &mut i32,
     s2: &mut i32,
     op1: &mut usize,
     op2: &mut usize,
 ) {
-    match other_slot {
-        Some(ParentSlot::One) => {
-            *s2 = val;
-            *op2 = ptr;
-        }
-        Some(ParentSlot::Two) => {
+    match slot {
+        ParentSlot::One => {
             *s1 = val;
             *op1 = ptr;
         }
-        None => {
-            if !parent_ptr_set(*op1) {
-                *s1 = val;
-                *op1 = ptr;
-            } else if !parent_ptr_set(*op2) {
-                *s2 = val;
-                *op2 = ptr;
-            }
+        ParentSlot::Two => {
+            *s2 = val;
+            *op2 = ptr;
         }
+    }
+}
+
+fn place_new(
+    ptr: usize,
+    val: i32,
+    other: Option<ParentSlot>,
+    s1: &mut i32,
+    s2: &mut i32,
+    op1: &mut usize,
+    op2: &mut usize,
+) {
+    match other {
+        Some(ParentSlot::One) => set_slot(ParentSlot::Two, val, ptr, s1, s2, op1, op2),
+        Some(ParentSlot::Two) => set_slot(ParentSlot::One, val, ptr, s1, s2, op1, op2),
+        None if !parent_ptr_set(*op1) => set_slot(ParentSlot::One, val, ptr, s1, s2, op1, op2),
+        None if !parent_ptr_set(*op2) => set_slot(ParentSlot::Two, val, ptr, s1, s2, op1, op2),
+        None => {}
     }
 }
 
@@ -329,31 +364,26 @@ fn assign_by_identity(
     lp2: usize,
 ) -> (i32, i32, usize, usize) {
     if !parent_ptr_set(lp1) && !parent_ptr_set(lp2) {
-        return (va, vb, p1, p2);
+        return call_order(p1, p2, va, vb);
     }
 
     let a_slot = slot_of(p1, lp1, lp2);
     let b_slot = slot_of(p2, lp1, lp2);
     let a_new = parent_ptr_set(p1) && a_slot.is_none();
     let b_new = parent_ptr_set(p2) && b_slot.is_none();
-    if a_new && b_new {
-        return (va, vb, p1, p2);
+    if (a_new && b_new) || (a_new && !parent_ptr_set(p2)) || (b_new && !parent_ptr_set(p1)) {
+        return call_order(p1, p2, va, vb);
     }
 
-    let mut s1 = IND1.load(Ordering::Relaxed);
-    let mut s2 = IND2.load(Ordering::Relaxed);
-    let mut op1 = lp1;
-    let mut op2 = lp2;
-
-    match a_slot {
-        Some(ParentSlot::One) => s1 = va,
-        Some(ParentSlot::Two) => s2 = va,
-        None => {}
+    let mut s1 = -1i32;
+    let mut s2 = -1i32;
+    let mut op1 = usize::MAX;
+    let mut op2 = usize::MAX;
+    if let Some(s) = a_slot {
+        set_slot(s, va, p1, &mut s1, &mut s2, &mut op1, &mut op2);
     }
-    match b_slot {
-        Some(ParentSlot::One) => s1 = vb,
-        Some(ParentSlot::Two) => s2 = vb,
-        None => {}
+    if let Some(s) = b_slot {
+        set_slot(s, vb, p2, &mut s1, &mut s2, &mut op1, &mut op2);
     }
     if a_new {
         place_new(p1, va, b_slot, &mut s1, &mut s2, &mut op1, &mut op2);
@@ -418,6 +448,7 @@ unsafe extern "C" fn show_hook(this: *mut c_void, mi: *const c_void) {
     if !this.is_null() {
         STEP.store(this as usize, Ordering::Relaxed);
     }
+    clear_cached_values();
     let o = SHOW_TRAMP.load(Ordering::Relaxed);
     if o != 0 {
         let f: ShowFn = std::mem::transmute(o);
@@ -435,16 +466,6 @@ unsafe extern "C" fn hide_hook(this: *mut c_void, force: bool, mi: *const c_void
     if o != 0 {
         let f: HideFn = std::mem::transmute(o);
         f(this, force, mi);
-    }
-}
-
-type ResetFn = unsafe extern "C" fn(*mut c_void, *const c_void);
-unsafe extern "C" fn reset_hook(this: *mut c_void, mi: *const c_void) {
-    clear_cached_values();
-    let tr = RESET_TRAMP.load(Ordering::Relaxed);
-    if tr != 0 {
-        let f: ResetFn = std::mem::transmute(tr);
-        f(this, mi);
     }
 }
 
@@ -504,13 +525,6 @@ pub fn install() -> String {
     if step.is_null() {
         notes.push_str("step:miss ");
     } else {
-        for name in ["Reset", "Clear", "OnClickReset"] {
-            if let Some(tramp) = hook_method(step, name, 0, reset_hook as *mut c_void) {
-                RESET_TRAMP.store(tramp as usize, Ordering::Relaxed);
-                notes.push_str(&format!("resetfn:{name} "));
-                break;
-            }
-        }
         match hook_method(step, "Show", 0, show_hook as *mut c_void) {
             Some(tramp) => {
                 SHOW_TRAMP.store(tramp as usize, Ordering::Relaxed);

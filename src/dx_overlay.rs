@@ -123,12 +123,15 @@ fn draw_frame(slot: &mut Option<Painter>, swapchain: *mut c_void) -> Result<(), 
         ..Default::default()
     };
 
-    let scale = affinity::size().max(0.8);
+    let user_scale = affinity::size().max(0.8);
+    let res_scale = (height as f32 / 1080.0).clamp(0.5, 4.0);
+    let scale = user_scale * res_scale;
     let items = affinity::badge_items();
     let output = painter.ctx.run(raw, |ctx| {
         let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("aff_badges"));
         let painter = ctx.layer_painter(layer);
         let font = egui::FontId::proportional(16.0 * scale);
+        let pad = egui::vec2(8.0 * res_scale, 4.0 * res_scale);
         let color = egui::Color32::from_rgb(235, 238, 245);
         let bg = egui::Color32::from_rgba_unmultiplied(32, 34, 40, 210);
         for (pos_i, label, v) in &items {
@@ -139,7 +142,6 @@ fn draw_frame(slot: &mut Option<Painter>, swapchain: *mut c_void) -> Result<(), 
             let origin = egui::pos2(fx * width as f32, fy * height as f32);
             let text = format!("{label}  {v}");
             let galley = painter.layout_no_wrap(text, font.clone(), color);
-            let pad = egui::vec2(8.0, 4.0);
             let rect = egui::Rect::from_min_size(origin, galley.size() + pad * 2.0);
             painter.rect_filled(rect, 0.0, bg);
             painter.galley(origin + pad, galley, color);
