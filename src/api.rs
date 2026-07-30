@@ -29,11 +29,7 @@ struct ApiFns {
         *const c_char,
     ) -> *mut c_void,
     il2cpp_get_method_addr: unsafe extern "C" fn(*mut c_void, *const c_char, i32) -> *mut c_void,
-    gui_register_menu_section_with_icon: unsafe extern "C" fn(
-        *const c_char,
-        *const c_char,
-        *const u8,
-        usize,
+    gui_register_menu_section: unsafe extern "C" fn(
         Option<GuiMenuSectionCallback>,
         *mut c_void,
     ) -> bool,
@@ -77,7 +73,7 @@ pub fn init(get_api: HachimiGetApiFn) -> bool {
         il2cpp_get_assembly_image: req!(get_api, "il2cpp_get_assembly_image"),
         il2cpp_get_class: req!(get_api, "il2cpp_get_class"),
         il2cpp_get_method_addr: req!(get_api, "il2cpp_get_method_addr"),
-        gui_register_menu_section_with_icon: req!(get_api, "gui_register_menu_section_with_icon"),
+        gui_register_menu_section: req!(get_api, "gui_register_menu_section"),
         gui_ui_heading: req!(get_api, "gui_ui_heading"),
         gui_ui_label: req!(get_api, "gui_ui_label"),
         gui_ui_small: req!(get_api, "gui_ui_small"),
@@ -161,19 +157,8 @@ pub fn get_method_addr(class: *mut c_void, name: &str, argc: i32) -> *mut c_void
     unsafe { (a.il2cpp_get_method_addr)(class, name.as_ptr(), argc) }
 }
 
-pub fn register_menu_section(title: &str, cb: GuiMenuSectionCallback) -> bool {
-    let a = api();
-    let title = CString::new(title).unwrap();
-    unsafe {
-        (a.gui_register_menu_section_with_icon)(
-            title.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-            Some(cb),
-            std::ptr::null_mut(),
-        )
-    }
+pub fn register_menu_section(_title: &str, cb: GuiMenuSectionCallback) -> bool {
+    unsafe { (api().gui_register_menu_section)(Some(cb), std::ptr::null_mut()) }
 }
 
 pub fn ui_heading(ui: *mut c_void, text: &str) {
