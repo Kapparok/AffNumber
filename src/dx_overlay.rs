@@ -1,5 +1,5 @@
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use windows::core::Interface;
@@ -10,16 +10,23 @@ use windows::Win32::Graphics::Direct3D11::{
     ID3D11DeviceContext, ID3D11GeometryShader, ID3D11InputLayout, ID3D11PixelShader,
     ID3D11RasterizerState, ID3D11RenderTargetView, ID3D11SamplerState, ID3D11ShaderResourceView,
     ID3D11Texture2D, ID3D11VertexShader, D3D11_RENDER_TARGET_VIEW_DESC, D3D11_RTV_DIMENSION_TEXTURE2D,
-    D3D11_VIEWPORT, D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE,
+    D3D11_TEXTURE2D_DESC, D3D11_VIEWPORT,
+    D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE,
 };
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_R8G8B8A8_UNORM};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
+    DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+};
 use windows::Win32::Graphics::Dxgi::IDXGISwapChain;
 
 use crate::affinity;
 use crate::api;
 
-static STARTED: AtomicBool = AtomicBool::new(false);
+static PRESENT_OK: AtomicBool = AtomicBool::new(false);
+static REGISTER_WARNED: AtomicBool = AtomicBool::new(false);
+static DRAW_FAILS: AtomicU32 = AtomicU32::new(0);
 static STATE: OnceLock<Mutex<Option<Painter>>> = OnceLock::new();
+static LAST_ERR: Mutex<String> = Mutex::new(String::new());
 
 struct Painter {
     swapchain_ptr: usize,
@@ -32,34 +39,57 @@ struct Painter {
     height: u32,
 }
 
+pub fn present_ok() -> bool {
+    PRESENT_OK.load(Ordering::Relaxed)
+}
+
+pub fn last_draw_error() -> Option<String> {
+    LAST_ERR.lock().ok().map(|g| g.clone()).filter(|s| !s.is_empty())
+}
+
 pub fn start() {
-    if STARTED.swap(true, Ordering::Relaxed) {
+    let _ = STATE.set(Mutex::new(None));
+    ensure_present();
+}
+
+pub fn ensure_present() {
+    if PRESENT_OK.load(Ordering::Relaxed) {
         return;
     }
-    let _ = STATE.set(Mutex::new(None));
     if api::register_present_callback(on_present) {
-        api::log_info("AffNumber: DXGI Present overlay registered (exclusive-fullscreen safe)");
-    } else {
-        api::log_warn(
-            "AffNumber: Present callback register failed — badges may not show in exclusive fullscreen",
-        );
+        PRESENT_OK.store(true, Ordering::Relaxed);
+        api::log_info("AffNumber: DXGI Present overlay registered");
+    } else if !REGISTER_WARNED.swap(true, Ordering::Relaxed) {
+        api::log_warn("AffNumber: Present register failed — will retry");
     }
 }
 
 unsafe extern "C" fn on_present(swapchain: *mut c_void, _userdata: *mut c_void) {
+    PRESENT_OK.store(true, Ordering::Relaxed);
     affinity::poll_toggle_hotkey();
     if swapchain.is_null() || !affinity::should_draw_badges() {
         return;
     }
-
     let Some(lock) = STATE.get() else {
         return;
     };
     let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-    if let Err(e) = draw_frame(&mut guard, swapchain) {
-        static LOGGED: AtomicBool = AtomicBool::new(false);
-        if !LOGGED.swap(true, Ordering::Relaxed) {
-            api::log_warn(&format!("AffNumber present draw: {e}"));
+    match draw_frame(&mut guard, swapchain) {
+        Ok(()) => {
+            DRAW_FAILS.store(0, Ordering::Relaxed);
+            if let Ok(mut g) = LAST_ERR.lock() {
+                g.clear();
+            }
+        }
+        Err(e) => {
+            *guard = None;
+            let n = DRAW_FAILS.fetch_add(1, Ordering::Relaxed);
+            if let Ok(mut g) = LAST_ERR.lock() {
+                *g = e.clone();
+            }
+            if n < 3 || n % 120 == 0 {
+                api::log_warn(&format!("AffNumber present draw: {e}"));
+            }
         }
     }
 }
@@ -69,32 +99,27 @@ fn draw_frame(slot: &mut Option<Painter>, swapchain: *mut c_void) -> Result<(), 
     let sc = std::mem::ManuallyDrop::new(sc);
     let ptr = swapchain as usize;
 
-    let (width, height) = unsafe {
-        let desc = sc.GetDesc().map_err(|e| format!("GetDesc: {e}"))?;
-        (
-            desc.BufferDesc.Width.max(1),
-            desc.BufferDesc.Height.max(1),
-        )
+    let (width, height, format) = unsafe {
+        let bb: ID3D11Texture2D = sc.GetBuffer(0).map_err(|e| format!("GetBuffer: {e}"))?;
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        bb.GetDesc(&mut desc);
+        (desc.Width.max(1), desc.Height.max(1), desc.Format)
     };
 
-    let need_new = match slot.as_ref() {
-        None => true,
-        Some(p) => {
-            p.swapchain_ptr != ptr || p.width != width || p.height != height || p.rtv.is_none()
-        }
-    };
+    let need_new = slot.as_ref().is_none_or(|p| {
+        p.swapchain_ptr != ptr || p.width != width || p.height != height || p.rtv.is_none()
+    });
 
     if need_new {
-        let (device, context) = unsafe {
-            let device: ID3D11Device = sc.GetDevice().map_err(|e| format!("GetDevice: {e}"))?;
-            let context: ID3D11DeviceContext = device
+        let device: ID3D11Device = unsafe { sc.GetDevice().map_err(|e| format!("GetDevice: {e}"))? };
+        let context: ID3D11DeviceContext = unsafe {
+            device
                 .GetImmediateContext()
-                .map_err(|e| format!("GetImmediateContext: {e}"))?;
-            (device, context)
+                .map_err(|e| format!("GetImmediateContext: {e}"))?
         };
         let renderer =
             egui_directx11::Renderer::new(&device).map_err(|e| format!("egui renderer: {e}"))?;
-        let rtv = create_rtv(&sc, &device)?;
+        let rtv = create_rtv(&sc, &device, format)?;
         let ctx = egui::Context::default();
         install_badge_font(&ctx);
         *slot = Some(Painter {
@@ -118,7 +143,7 @@ fn draw_frame(slot: &mut Option<Painter>, swapchain: *mut c_void) -> Result<(), 
         egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width as f32, height as f32));
     let raw = egui::RawInput {
         screen_rect: Some(screen),
-        max_texture_side: Some(2048),
+        max_texture_side: Some(8192),
         predicted_dt: 1.0 / 60.0,
         ..Default::default()
     };
@@ -149,19 +174,17 @@ fn draw_frame(slot: &mut Option<Painter>, swapchain: *mut c_void) -> Result<(), 
     });
 
     let (renderer_output, _, _) = egui_directx11::split_output(output);
-
     painter.backup.save(&painter.context);
-    painter
+    let rendered = painter
         .renderer
-        .render(&painter.context, rtv, &painter.ctx, renderer_output)
-        .map_err(|e| format!("render: {e}"))?;
+        .render(&painter.context, rtv, &painter.ctx, renderer_output);
     painter.backup.restore(&painter.context);
-    Ok(())
+    rendered.map_err(|e| format!("render: {e}"))
 }
 
 fn install_badge_font(ctx: &egui::Context) {
     const FONT: &[u8] = include_bytes!("../assets/Ubuntu-Light.ttf");
-    let mut fonts = egui::FontDefinitions::default();
+    let mut fonts = egui::FontDefinitions::empty();
     fonts.font_data.insert(
         "ubuntu".into(),
         std::sync::Arc::new(egui::FontData::from_static(FONT)),
@@ -177,19 +200,43 @@ fn install_badge_font(ctx: &egui::Context) {
 fn create_rtv(
     sc: &IDXGISwapChain,
     device: &ID3D11Device,
+    format: DXGI_FORMAT,
 ) -> Result<ID3D11RenderTargetView, String> {
     unsafe {
-        let backbuffer: ID3D11Texture2D =
-            sc.GetBuffer(0).map_err(|e| format!("GetBuffer: {e}"))?;
-        let mut desc = D3D11_RENDER_TARGET_VIEW_DESC::default();
-        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-        let mut rtv = None;
-        device
-            .CreateRenderTargetView(&backbuffer, Some(&desc), Some(&mut rtv))
-            .map_err(|e| format!("CreateRTV: {e}"))?;
-        rtv.ok_or_else(|| "CreateRTV returned null".into())
+        let bb: ID3D11Texture2D = sc.GetBuffer(0).map_err(|e| format!("GetBuffer: {e}"))?;
+        if let Ok(rtv) = try_rtv(device, &bb, None) {
+            return Ok(rtv);
+        }
+        for f in [
+            format,
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
+        ] {
+            let desc = D3D11_RENDER_TARGET_VIEW_DESC {
+                Format: f,
+                ViewDimension: D3D11_RTV_DIMENSION_TEXTURE2D,
+                ..Default::default()
+            };
+            if let Ok(rtv) = try_rtv(device, &bb, Some(&desc)) {
+                return Ok(rtv);
+            }
+        }
+        Err(format!("CreateRTV failed for {format:?}"))
     }
+}
+
+unsafe fn try_rtv(
+    device: &ID3D11Device,
+    bb: &ID3D11Texture2D,
+    desc: Option<&D3D11_RENDER_TARGET_VIEW_DESC>,
+) -> Result<ID3D11RenderTargetView, ()> {
+    let mut rtv = None;
+    device
+        .CreateRenderTargetView(bb, desc.map(|d| d as *const _), Some(&mut rtv))
+        .map_err(|_| ())?;
+    rtv.ok_or(())
 }
 
 #[derive(Default)]

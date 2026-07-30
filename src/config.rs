@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::affinity;
 use crate::api;
+use crate::dx_overlay;
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
 struct ScreenPos {
@@ -142,11 +143,13 @@ impl From<CfgLegacy> for Cfg {
 }
 
 fn path() -> Option<std::path::PathBuf> {
-    let dir = api::base_dir().or_else(|| {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("hachimi")))
-    })?;
+    let dir = api::base_dir()
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("hachimi")))
+        })
+        .or_else(|| std::env::current_dir().ok().map(|d| d.join("hachimi")))?;
     Some(dir.join("affnumber.json"))
 }
 
@@ -307,6 +310,8 @@ pub extern "C" fn menu_section(ui: *mut c_void, _userdata: *mut c_void) {
             "Overlay disabled — press {} or enable below",
             affinity::toggle_key_name()
         )
+    } else if !dx_overlay::present_ok() {
+        "Present not ready — update Hachimi Edge / try windowed mode".into()
     } else if affinity::should_draw_badges() {
         "Legacy Select open — badges drawing".into()
     } else if affinity::on_legacy_select() && affinity::dialog_open() {
@@ -324,6 +329,13 @@ pub extern "C" fn menu_section(ui: *mut c_void, _userdata: *mut c_void) {
         (220, 180, 80)
     };
     api::ui_colored_label(ui, r, g, b, 255, &status);
+    let notes = affinity::install_notes();
+    if !notes.is_empty() {
+        api::ui_small(ui, &notes);
+    }
+    if let Some(err) = dx_overlay::last_draw_error() {
+        api::ui_colored_label(ui, 220, 120, 100, 255, &format!("Draw: {err}"));
+    }
 
     let mut en = affinity::is_enabled();
     if api::ui_checkbox(ui, "Show affinity numbers", &mut en) {

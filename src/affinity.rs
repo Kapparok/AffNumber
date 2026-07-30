@@ -30,9 +30,11 @@ static HIDE_TRAMP: AtomicUsize = AtomicUsize::new(0);
 static ISDLG_TRAMP: AtomicUsize = AtomicUsize::new(0);
 
 static DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
+static DIALOG_HOOKED: AtomicBool = AtomicBool::new(false);
 static LAST_TRAINEE: AtomicI32 = AtomicI32::new(i32::MIN);
 static LAST_P1: AtomicUsize = AtomicUsize::new(usize::MAX);
 static LAST_P2: AtomicUsize = AtomicUsize::new(usize::MAX);
+static INSTALL_NOTES: Mutex<String> = Mutex::new(String::new());
 
 const DEFAULT_POS: [[f32; 2]; 3] = [[0.35, 0.15], [0.15, 0.50], [0.30, 0.50]];
 const DEFAULT_SIZE: f32 = 1.40;
@@ -90,17 +92,27 @@ pub fn on_legacy_select() -> bool {
 }
 
 pub fn should_draw_badges() -> bool {
-    if !is_enabled() || !on_legacy_select() || DIALOG_OPEN.load(Ordering::Relaxed) {
+    if !is_enabled() || !on_legacy_select() {
         return false;
     }
-    let Some((_, ind1, ind2)) = values() else {
+    if DIALOG_HOOKED.load(Ordering::Relaxed) && DIALOG_OPEN.load(Ordering::Relaxed) {
+        return false;
+    }
+    let Some((total, ind1, ind2)) = values() else {
         return false;
     };
-    ind1 >= 0 || ind2 >= 0
+    total >= 0 || ind1 >= 0 || ind2 >= 0
 }
 
 pub fn dialog_open() -> bool {
-    DIALOG_OPEN.load(Ordering::Relaxed)
+    DIALOG_HOOKED.load(Ordering::Relaxed) && DIALOG_OPEN.load(Ordering::Relaxed)
+}
+
+pub fn install_notes() -> String {
+    INSTALL_NOTES
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default()
 }
 
 fn label_get(m: &Mutex<String>, fallback: &str) -> String {
@@ -445,10 +457,14 @@ unsafe extern "C" fn calc_hook(trainee: i32, p1: usize, p2: usize, mi: usize) ->
 
 type ShowFn = unsafe extern "C" fn(*mut c_void, *const c_void);
 unsafe extern "C" fn show_hook(this: *mut c_void, mi: *const c_void) {
+    dx_overlay::ensure_present();
+    let prev = STEP.load(Ordering::Relaxed);
     if !this.is_null() {
         STEP.store(this as usize, Ordering::Relaxed);
     }
-    clear_cached_values();
+    if prev == 0 {
+        clear_cached_values();
+    }
     let o = SHOW_TRAMP.load(Ordering::Relaxed);
     if o != 0 {
         let f: ShowFn = std::mem::transmute(o);
@@ -492,67 +508,83 @@ fn hook_method(
         return None;
     }
     let tramp = api::hook(m, detour);
-    if tramp.is_null() {
-        None
-    } else {
-        Some(tramp)
+    (!tramp.is_null()).then_some(tramp)
+}
+
+fn set_notes(msg: String) -> String {
+    let _ = INSTALL_NOTES.lock().map(|mut g| *g = msg.clone());
+    msg
+}
+
+fn note_hook(notes: &mut String, tag: &str, slot: &AtomicUsize, tramp: Option<*mut c_void>) {
+    match tramp {
+        Some(t) => {
+            slot.store(t as usize, Ordering::Relaxed);
+            notes.push_str(tag);
+            notes.push_str(":ok ");
+        }
+        None => {
+            notes.push_str(tag);
+            notes.push_str(":fail ");
+        }
     }
 }
 
 pub fn install() -> String {
     load_defaults_and_cfg();
     dx_overlay::start();
-    let mut notes = String::new();
 
     let image = api::game_image();
     if image.is_null() {
-        return "game assembly not found".into();
+        return set_notes("game assembly not found".into());
     }
-
     let smu = api::get_class(image, "Gallop", "SingleModeUtils");
     if smu.is_null() {
-        return "SingleModeUtils not found".into();
+        return set_notes("SingleModeUtils not found".into());
     }
-    match hook_method(smu, "CalcRelationPoint", 3, calc_hook as *mut c_void) {
-        Some(tramp) => {
-            CALC_TRAMP.store(tramp as usize, Ordering::Relaxed);
-            notes.push_str("calc:ok ");
-        }
-        None => notes.push_str("calc:miss "),
-    }
+
+    let mut notes = String::new();
+    note_hook(
+        &mut notes,
+        "calc",
+        &CALC_TRAMP,
+        hook_method(smu, "CalcRelationPoint", 3, calc_hook as *mut c_void),
+    );
 
     let step = api::get_class(image, "Gallop", "SingleModeStartStepSuccessionSelect");
     if step.is_null() {
         notes.push_str("step:miss ");
     } else {
-        match hook_method(step, "Show", 0, show_hook as *mut c_void) {
-            Some(tramp) => {
-                SHOW_TRAMP.store(tramp as usize, Ordering::Relaxed);
-                notes.push_str("show:ok ");
-            }
-            None => notes.push_str("show:fail "),
-        }
-        match hook_method(step, "Hide", 1, hide_hook as *mut c_void) {
-            Some(tramp) => {
-                HIDE_TRAMP.store(tramp as usize, Ordering::Relaxed);
-                notes.push_str("hide:ok ");
-            }
-            None => notes.push_str("hide:fail "),
-        }
+        note_hook(
+            &mut notes,
+            "show",
+            &SHOW_TRAMP,
+            hook_method(step, "Show", 0, show_hook as *mut c_void),
+        );
+        note_hook(
+            &mut notes,
+            "hide",
+            &HIDE_TRAMP,
+            hook_method(step, "Hide", 1, hide_hook as *mut c_void),
+        );
     }
 
     let dm = api::get_class(image, "Gallop", "DialogManager");
-    if dm.is_null() {
-        notes.push_str("dialog:miss");
+    if let Some(tramp) = (!dm.is_null())
+        .then(|| hook_method(dm, "get_IsShowDialog", 0, isdlg_hook as *mut c_void))
+        .flatten()
+    {
+        ISDLG_TRAMP.store(tramp as usize, Ordering::Relaxed);
+        DIALOG_HOOKED.store(true, Ordering::Relaxed);
+        notes.push_str("dialog:ok ");
     } else {
-        match hook_method(dm, "get_IsShowDialog", 0, isdlg_hook as *mut c_void) {
-            Some(tramp) => {
-                ISDLG_TRAMP.store(tramp as usize, Ordering::Relaxed);
-                notes.push_str("dialog:ok");
-            }
-            None => notes.push_str("dialog:miss"),
-        }
+        notes.push_str("dialog:miss ");
     }
 
-    format!("affinity: {}", notes.trim())
+    notes.push_str(if dx_overlay::present_ok() {
+        "present:ok"
+    } else {
+        "present:pending"
+    });
+    set_notes(format!("affinity: {}", notes.trim()))
 }

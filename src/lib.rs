@@ -16,7 +16,7 @@ pub unsafe extern "C" fn hachimi_init_v3(get_api: HachimiGetApiFn, version: i32)
         return InitResult::Error;
     }
 
-    api::log_info("AffNumber 1.1.0 loading…");
+    api::log_info("AffNumber 1.1.1 loading…");
 
     if !api::register_menu_section("AffNumber", config::menu_section) {
         api::log_warn("failed to register menu section");
